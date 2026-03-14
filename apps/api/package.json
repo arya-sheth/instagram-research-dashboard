@@ -1,0 +1,33 @@
+﻿{
+  "name": "@fintrack/api",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "nest start --watch",
+    "build": "nest build",
+    "start": "node dist/main.js",
+    "install:browsers": "playwright install chromium",
+    "instagram:login": "node scripts/save-instagram-session.js"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.16",
+    "@nestjs/core": "^11.1.16",
+    "@nestjs/mapped-types": "^2.1.0",
+    "@nestjs/platform-express": "^11.1.16",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.1",
+    "next": "15.5.12",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "cheerio": "^1.1.2",
+    "playwright": "^1.55.0"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.16",
+    "@nestjs/schematics": "^11.0.6",
+    "@nestjs/testing": "^11.1.16",
+    "@types/node": "^22.10.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.7.2"
+  }
+}

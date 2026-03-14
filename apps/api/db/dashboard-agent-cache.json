@@ -1,0 +1,104 @@
+[
+  {
+    "key": "{\"companyName\":\"the whole truth\",\"instagramHandle\":\"thewholetruthfoods\",\"industry\":\"\",\"competitorLimit\":4,\"recentPostLimit\":70}",
+    "generatedAt": "2026-03-14T18:05:05.773Z",
+    "result": {
+      "generatedAt": "2026-03-14T18:05:05.766Z",
+      "sourceMode": "agent-4-dashboard",
+      "sessionId": "dashboard-1773511505766",
+      "target": {
+        "brandName": "the whole truth",
+        "handle": "thewholetruthfoods",
+        "profileUrl": "https://www.instagram.com/thewholetruthfoods/",
+        "category": "Unknown category",
+        "bio": "🌎 Re-building the world’s trust in its food\n🛍 100% clean snacks \nExplore The Whole Truth for the Next Gen 👇",
+        "followers": 351000,
+        "verified": false,
+        "screenshotPath": "https://scontent.cdninstagram.com/v/t51.82787-19/649819736_18120723271612252_4228951383010998140_n.jpg?stp=dst-jpg_s100x100_tt6&_nc_cat=1&ccb=7-5&_nc_sid=bf7eb4&efg=eyJ2ZW5jb2RlX3RhZyI6InByb2ZpbGVfcGljLnd3dy4xMDgwLkMzIn0%3D&_nc_ohc=hVZdjDLxpAAQ7kNvwEiPpYC&_nc_oc=AdkaVl6jCQIjVSzHUmlBXNX-rDTTLM4ROCxjbmfaa4o4mTnUMQXrQHZgcoRULeCD9W9T1CtLKPx1caLJDmBg-xfL&_nc_zt=24&_nc_ht=scontent.cdninstagram.com&_nc_gid=oJ7xsZN7Q68pCAIMVuSIfw&_nc_ss=8&oh=00_AfyXePriz3icts-O2OGWzSZP6aH8CfA93k9joj7pXLKN5Q&oe=69BB8F1B"
+      },
+      "collection": {
+        "summary": "Discovery Agent validated @thewholetruthfoods, Collection Agent gathered 70 items, and Insight Agent ranked 0 Indian competitors.",
+        "warnings": [
+          "Free local collector is running through Playwright instead of a paid provider.",
+          "Saved Instagram session detected. Deep post and reel collection is enabled.",
+          "Large runs are slower now because each post or reel is collected directly from Instagram pages on your machine."
+        ]
+      },
+      "competitors": [],
+      "marketSummary": {
+        "competitorCount": 0,
+        "averageFollowers": 0,
+        "averageViewsAcrossCompetitors": null,
+        "averageReelViewsAcrossCompetitors": null,
+        "topHookThemes": [],
+        "topCaptionStyles": [],
+        "bestPostingWindows": [],
+        "bestPerformingPostSamples": []
+      },
+      "recommendations": {
+        "targetObservation": "Insights are based on 70 collected post/reel items across 1 Instagram accounts.",
+        "priorities": [
+          "Start with the highest-frequency hook patterns among the top-ranked competitors.",
+          "Use the repeated posting windows and interval patterns as the first scheduling benchmark.",
+          "Borrow thumbnail patterns from the top-performing reels before changing copy structure."
+        ],
+        "buildNext": [
+          "Add longitudinal saved runs so the dashboard can compare hook and posting changes over time.",
+          "Add CSV export for the normalized media inventory per competitor.",
+          "Wire Instagram login fallback only for accounts where provider collection is incomplete."
+        ]
+      }
+    }
+  },
+  {
+    "key": "{\"companyName\":\"whole truth\",\"instagramHandle\":\"thewholetruthfoods\",\"industry\":\"\",\"competitorLimit\":4,\"recentPostLimit\":80}",
+    "generatedAt": "2026-03-14T17:45:29.757Z",
+    "result": {
+      "generatedAt": "2026-03-14T17:45:29.756Z",
+      "sourceMode": "agent-4-dashboard",
+      "sessionId": "dashboard-1773510329756",
+      "target": {
+        "brandName": "whole truth",
+        "handle": "thewholetruthfoods",
+        "profileUrl": "https://www.instagram.com/thewholetruthfoods/",
+        "category": "Unknown category",
+        "bio": "🌎 Re-building the world’s trust in its food\n🛍 100% clean snacks \nExplore The Whole Truth for the Next Gen 👇",
+        "followers": 351000,
+        "verified": false,
+        "screenshotPath": "https://scontent.cdninstagram.com/v/t51.82787-19/649819736_18120723271612252_4228951383010998140_n.jpg?stp=dst-jpg_s100x100_tt6&_nc_cat=1&ccb=7-5&_nc_sid=bf7eb4&efg=eyJ2ZW5jb2RlX3RhZyI6InByb2ZpbGVfcGljLnd3dy4xMDgwLkMzIn0%3D&_nc_ohc=hVZdjDLxpAAQ7kNvwEiPpYC&_nc_oc=AdkaVl6jCQIjVSzHUmlBXNX-rDTTLM4ROCxjbmfaa4o4mTnUMQXrQHZgcoRULeCD9W9T1CtLKPx1caLJDmBg-xfL&_nc_zt=24&_nc_ht=scontent.cdninstagram.com&_nc_gid=DKNtcDpTti9Isx-k2CD-nw&_nc_ss=8&oh=00_AfyiTYlMlRPTgwCwsSGKmu0-OlbR6cLAaerlGQs9Mz-xeg&oe=69BB56DB"
+      },
+      "collection": {
+        "summary": "Discovery Agent validated @thewholetruthfoods, Collection Agent gathered 80 items, and Insight Agent ranked 0 Indian competitors.",
+        "warnings": [
+          "Free local collector is running through Playwright instead of a paid provider.",
+          "Saved Instagram session detected. Deep post and reel collection is enabled.",
+          "Large runs are slower now because each post or reel is collected directly from Instagram pages on your machine."
+        ]
+      },
+      "competitors": [],
+      "marketSummary": {
+        "competitorCount": 0,
+        "averageFollowers": 0,
+        "averageViewsAcrossCompetitors": null,
+        "averageReelViewsAcrossCompetitors": null,
+        "topHookThemes": [],
+        "topCaptionStyles": [],
+        "bestPostingWindows": [],
+        "bestPerformingPostSamples": []
+      },
+      "recommendations": {
+        "targetObservation": "Insights are based on 80 collected post/reel items across 1 Instagram accounts.",
+        "priorities": [
+          "Start with the highest-frequency hook patterns among the top-ranked competitors.",
+          "Use the repeated posting windows and interval patterns as the first scheduling benchmark.",
+          "Borrow thumbnail patterns from the top-performing reels before changing copy structure."
+        ],
+        "buildNext": [
+          "Add longitudinal saved runs so the dashboard can compare hook and posting changes over time.",
+          "Add CSV export for the normalized media inventory per competitor.",
+          "Wire Instagram login fallback only for accounts where provider collection is incomplete."
+        ]
+      }
+    }
+  }
+]
