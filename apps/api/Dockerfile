@@ -5,14 +5,14 @@ FROM mcr.microsoft.com/playwright:v1.50.1-jammy
 # Set working directory
 WORKDIR /app
 
-# Copy package files
-COPY package*.json ./
+# Copy package files from the api directory
+COPY apps/api/package*.json ./
 
 # Install dependencies
 RUN npm install
 
-# Copy the rest of the application code
-COPY . .
+# Copy the rest of the application code from the api directory
+COPY apps/api/ .
 
 # Build the NestJS application
 RUN npm run build
