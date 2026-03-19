@@ -603,7 +603,7 @@ export class InstagramPlaywrightService {
     try {
       const useSession = preferSession && this.hasSavedSession();
       context = await browser.newContext(useSession ? { storageState: this.storageStatePath } : {});
-      const page = await context.newPage();
+      const page = await context!.newPage();
       return await run(page, useSession);
     } catch (error) {
       console.error('Error during Playwright page operation:', error);
