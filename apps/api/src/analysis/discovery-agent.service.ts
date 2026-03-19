@@ -132,7 +132,14 @@ type CsvBrandRecord = {
 
 @Injectable()
 export class DiscoveryAgentService {
-  private readonly brandsExcelPath = join(process.cwd(), '..', '..', 'brands_with_unique_propositions.csv');
+  private readonly csvPathCandidates = [
+    join(process.cwd(), '..', '..', 'data', 'brands_with_unique_propositions.csv'),
+    join(process.cwd(), '..', '..', 'data', 'Missing_Brands_Not_In_CSV-Default-view-export-1773647059137.csv'),
+    join(process.cwd(), '..', '..', 'brands_with_unique_propositions.csv'),
+    join(process.cwd(), '..', '..', 'Missing_Brands_Not_In_CSV-Default-view-export-1773647059137.csv'),
+    'C:\\Users\\aryaf\\Downloads\\brands_with_unique_propositions.csv',
+    'C:\\Users\\aryaf\\Downloads\\Missing_Brands_Not_In_CSV-Default-view-export-1773647059137.csv',
+  ];
   private readonly documentPaths = [
     'C:\\Users\\aryaf\\Downloads\\India_D2C_Brand_Bible_With_Instagram.md',
     'C:\\Users\\aryaf\\Downloads\\Altera_Institute_Non_D2C_Recruiters_Instagram.md',
@@ -1284,59 +1291,47 @@ export class DiscoveryAgentService {
     if (this.brandsCache) return this.brandsCache;
 
     const records: CsvBrandRecord[] = [];
+    for (const filePath of this.csvPathCandidates) {
+      if (!existsSync(filePath)) continue;
+      try {
+        const content = readFileSync(filePath, 'utf8');
+        const lines = content.split(/\r?\n/).filter((line) => line.trim());
+        if (lines.length < 2) continue;
 
-    // Try to load from brands_with_unique_propositions.csv using Python
-    const pythonScript = `
-import pandas as pd
-import json
-import sys
+        const header = this.parseCsvRow(lines[0]);
+        const companyIndex = header.findIndex((cell) => /^company$/i.test(cell));
+        const directHandleIndex = header.findIndex((cell) => /^id$/i.test(cell));
+        const computedHandleIndex = header.findIndex((cell) => /username - computed/i.test(cell));
+        const handleIndex = directHandleIndex !== -1 ? directHandleIndex : computedHandleIndex;
+        const directDomainIndex = header.findIndex((cell) => /^domain$/i.test(cell));
+        const categoryDomainIndex = header.findIndex((cell) => /^category$/i.test(cell));
+        const domainIndex = directDomainIndex !== -1 ? directDomainIndex : categoryDomainIndex;
+        const propositionIndex = header.findIndex((cell) => /^proposition$/i.test(cell));
 
-try:
-    df = pd.read_csv('${this.brandsExcelPath.replace(/\\/g, '\\\\')}', encoding='latin1')
-    records = []
-    for _, row in df.iterrows():
-        records.append({
-            'brand': str(row.get('Company', '')).strip(),
-            'instagramHandle': str(row.get('ID', '')).strip().replace('@', '') if pd.notna(row.get('ID')) else None,
-            'domain': str(row.get('Domain', '')).strip() if pd.notna(row.get('Domain')) else '',
-            'proposition': str(row.get('Proposition', '')).strip() if pd.notna(row.get('Proposition')) else '',
-        })
-    print(json.dumps(records))
-except Exception as e:
-    print(json.dumps([]), file=sys.stderr)
-`;
+        if (companyIndex === -1 || handleIndex === -1 || domainIndex === -1) continue;
 
-    const { writeFileSync, unlinkSync } = require('fs');
-    const { execSync } = require('child_process');
-    const tempPy = join(process.cwd(), 'load_brands.py');
-    writeFileSync(tempPy, pythonScript);
-
-    try {
-      const output = execSync(`python "${tempPy}"`, { 
-        encoding: 'utf8', 
-        stdio: ['pipe', 'pipe', 'ignore'],
-        maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large JSON
-      });
-      unlinkSync(tempPy);
-      const parsed = JSON.parse(output) as Array<{ brand: string; instagramHandle: string | null; domain: string; proposition: string }>;
-
-      for (const item of parsed) {
-        if (!item.brand || !item.domain) continue;
-        records.push({
-          brand: item.brand,
-          canonicalBrand: this.normalizeCompanyName(item.brand).toLowerCase(),
-          instagramHandle: item.instagramHandle,
-          domain: item.domain,
-          proposition: item.proposition,
-        });
+        for (const line of lines.slice(1)) {
+          const cells = this.parseCsvRow(line);
+          const brand = (cells[companyIndex] ?? '').trim();
+          const instagramHandle = (cells[handleIndex] ?? '').trim().replace(/^@/, '') || null;
+          const domain = (cells[domainIndex] ?? '').trim();
+          const proposition = (cells[propositionIndex] ?? '').trim();
+          if (!brand || !domain) continue;
+          records.push({
+            brand,
+            canonicalBrand: this.normalizeCompanyName(brand).toLowerCase(),
+            instagramHandle,
+            domain,
+            proposition,
+          });
+        }
+      } catch (error) {
+        console.error(`Failed to load brand CSV at ${filePath}:`, error);
       }
-    } catch (err) {
-      // Python/Excel load failed, return empty cache
-      console.error('Failed to load brands_with_unique_propositions.csv:', err);
     }
 
     this.brandsCache = this.dedupeBrands(records);
-    return records;
+    return this.brandsCache;
   }
 
   private parseCsvRow(row: string) {
