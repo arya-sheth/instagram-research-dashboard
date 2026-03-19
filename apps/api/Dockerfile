@@ -1,6 +1,6 @@
 # Use the official Microsoft Playwright image as a base
 # This image comes with all necessary system dependencies for Chromium
-FROM mcr.microsoft.com/playwright:v1.50.0-focal
+FROM mcr.microsoft.com/playwright:v1.50.1-jammy
 
 # Set working directory
 WORKDIR /app
