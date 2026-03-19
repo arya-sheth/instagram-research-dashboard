@@ -1,11 +1,11 @@
 services:
   - type: web
     name: instagram-research-api
-    runtime: node
+    runtime: docker
     rootDir: apps/api
     plan: free
-    buildCommand: npm install && npm run install:browsers && npm run build
-    startCommand: npm run start
+    dockerfilePath: Dockerfile
+    dockerContext: ../..
     healthCheckPath: /analysis/catalog
     envVars:
       - key: NODE_VERSION

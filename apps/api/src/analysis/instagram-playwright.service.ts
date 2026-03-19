@@ -169,14 +169,30 @@ export class InstagramPlaywrightService {
 
     const profileMeta = await this.scrapeProfileMeta(handle, true);
     if (!this.hasSavedSession()) {
-      const result = {
-        profileMeta,
-        mediaItems: [] as InstagramMediaItem[],
-        warnings: ['No saved Instagram login session found. Run npm.cmd run instagram:login once to enable deep post and reel collection.'],
-        usedSession: false,
-      };
-      this.profileMediaCache.set(cacheKey, result);
-      return result;
+      // Fallback: Attempt public scraping even without a session
+      const publicResult = await this.withPage(false, async (page, usedSession) => {
+        const warnings: string[] = ['Running in public mode (No login). Deep reel views might be limited.'];
+        const profileUrl = `https://www.instagram.com/${normalizedHandle}/`;
+        await this.safeGoto(page, profileUrl, 'domcontentloaded');
+        await page.waitForTimeout(1500);
+        
+        const postLinks = await this.collectLinksFromGrid(page, profileUrl, limit, 'post').catch(() => [] as string[]);
+        const combinedLinks = Array.from(new Set(postLinks)).slice(0, limit);
+        const mediaItems: InstagramMediaItem[] = [];
+
+        for (const mediaUrl of combinedLinks) {
+          try {
+            mediaItems.push(await this.scrapeMediaPageWithPage(page, mediaUrl));
+          } catch (error) {
+             // Silently fail on individual media items in public mode
+          }
+        }
+
+        return { profileMeta, mediaItems, warnings, usedSession: false };
+      });
+      
+      this.profileMediaCache.set(cacheKey, publicResult);
+      return publicResult;
     }
 
     const result = await this.withPage(true, async (page, usedSession) => {
@@ -219,7 +235,9 @@ export class InstagramPlaywrightService {
   }
 
   private async enrichWithInstaloader(handle: string, base: InstagramProfileMeta): Promise<InstagramProfileMeta> {
-    const pythonPath = join(process.cwd(), '..', '..', 'tools', 'python', 'python.exe');
+    const pythonPath = process.platform === 'win32' 
+      ? join(process.cwd(), '..', '..', 'tools', 'python', 'python.exe')
+      : 'python3';
     const instaloaderScriptPath = join(process.cwd(), 'scripts', 'instaloader_profile_meta.py');
     if (!existsSync(pythonPath) || !existsSync(instaloaderScriptPath)) {
       return base;
@@ -556,15 +574,31 @@ export class InstagramPlaywrightService {
     }
   }
 
-  private async withPage<T>(preferSession: boolean, run: (page: Page, usedSession: boolean) => Promise<T>): Promise<T> {
-    let browser;
-    try {
-      browser = await chromium.launch({ headless: true });
-    } catch (error) {
-      console.error('Failed to launch Playwright browser:', error);
-      throw error; // Let the caller handle it, but we log it.
-    }
+  private browserInstance: any = null;
 
+  async onModuleDestroy() {
+    if (this.browserInstance) {
+      await this.browserInstance.close().catch(() => undefined);
+    }
+  }
+
+  private async getBrowser() {
+    if (this.browserInstance) return this.browserInstance;
+    try {
+      this.browserInstance = await chromium.launch({ 
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'] 
+      });
+      return this.browserInstance;
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : 'Unknown launch error';
+      console.error('Failed to launch Playwright browser:', msg);
+      throw new Error(`Browser launch failed: ${msg}. Make sure playwright install chromium was run and system deps are installed.`);
+    }
+  }
+
+  private async withPage<T>(preferSession: boolean, run: (page: Page, usedSession: boolean) => Promise<T>): Promise<T> {
+    const browser = await this.getBrowser();
     let context: BrowserContext | null = null;
     try {
       const useSession = preferSession && this.hasSavedSession();
@@ -573,10 +607,13 @@ export class InstagramPlaywrightService {
       return await run(page, useSession);
     } catch (error) {
       console.error('Error during Playwright page operation:', error);
+      // If the browser crashed, we should reset it
+      if (error instanceof Error && (error.message.includes('browser has been closed') || error.message.includes('Target closed'))) {
+        this.browserInstance = null;
+      }
       throw error;
     } finally {
       if (context) await context.close().catch(() => undefined);
-      if (browser) await browser.close().catch(() => undefined);
     }
   }
 

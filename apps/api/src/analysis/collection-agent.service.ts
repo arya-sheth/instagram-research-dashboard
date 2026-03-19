@@ -143,9 +143,11 @@ export class CollectionAgentService {
         .filter((competitor) => competitor.officialInstagramHandle)
         .map((competitor) => [competitor.officialInstagramHandle as string, competitor]),
     );
-    const competitors = await Promise.all(
-      competitorHandles.map((handle) => this.collectAccount(handle, cap, competitorMap.get(handle))),
-    );
+    const competitors: AccountCollection[] = [];
+    for (const handle of competitorHandles) {
+      const competitor = await this.collectAccount(handle, cap, competitorMap.get(handle));
+      competitors.push(competitor);
+    }
 
     return {
       generatedAt: new Date().toISOString(),
