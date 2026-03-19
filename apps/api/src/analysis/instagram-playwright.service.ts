@@ -1,4 +1,4 @@
-﻿import { Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { BrowserContext, chromium, Page } from 'playwright';
@@ -97,6 +97,10 @@ export class InstagramPlaywrightService {
           usedSession,
         };
       }
+      await page.waitForTimeout(1800);
+      await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => undefined);
+      await page.locator('button').filter({ hasText: /not now|allow all cookies|only allow essential cookies|allow all/i }).first().click({ timeout: 1500 }).catch(() => undefined);
+      const rendered = await this.extractRenderedProfileSignals(page);
 
       const raw = await page.evaluate(() => ({
         title: document.title,
@@ -119,25 +123,37 @@ export class InstagramPlaywrightService {
       const publicEmailPresent = /"public_email":"[^"]+"/i.test(raw.html) || /email/i.test(raw.pageText);
       const categoryMatch = raw.html.match(/"category_name":"((?:\\.|[^"])*)"/i);
       const verified = /"is_verified":true/i.test(raw.html);
+      const profileWebsite = (
+        rendered.profileWebsite
+        ?? this.decodeInstagramString(websiteMatch?.[1] ?? '').replace(/\\\//g, '/')
+      ) || null;
+      const fullName = rendered.fullName ?? fullNameMatch?.[1]?.trim() ?? null;
+      const bio = rendered.bio ?? this.cleanText(bioMatch?.[1] ?? '');
+      const followers = rendered.followers ?? this.parseCompactNumber(countsMatch?.[1]);
+      const following = rendered.following ?? this.parseCompactNumber(countsMatch?.[2]);
+      const posts = rendered.posts ?? this.parseCompactNumber(countsMatch?.[3]);
+      const category = rendered.category ?? this.cleanText(this.decodeInstagramString(categoryMatch?.[1] ?? ''));
+      const hasPublicEmail = rendered.hasPublicEmail || publicEmailPresent;
 
-      return {
+      const baseResult = {
         handle: normalizedHandle,
         profileUrl,
         title,
-        fullName: fullNameMatch?.[1]?.trim() ?? null,
-        bio: this.cleanText(bioMatch?.[1] ?? ''),
-        profileWebsite: this.decodeInstagramString(websiteMatch?.[1] ?? '').replace(/\\\//g, '/') || null,
-        hasPublicEmail: publicEmailPresent,
-        followers: this.parseCompactNumber(countsMatch?.[1]),
-        following: this.parseCompactNumber(countsMatch?.[2]),
-        posts: this.parseCompactNumber(countsMatch?.[3]),
+        fullName,
+        bio,
+        profileWebsite,
+        hasPublicEmail,
+        followers,
+        following,
+        posts,
         verified,
-        category: this.cleanText(this.decodeInstagramString(categoryMatch?.[1] ?? '')),
+        category,
         profileImage: raw.ogImage || null,
         loginWall,
         exists,
         usedSession,
       };
+      return this.enrichWithInstaloader(normalizedHandle, baseResult);
     });
     this.profileMetaCache.set(cacheKey, result);
     return result;
@@ -200,6 +216,48 @@ export class InstagramPlaywrightService {
     });
     this.profileMediaCache.set(cacheKey, result);
     return result;
+  }
+
+  private async enrichWithInstaloader(handle: string, base: InstagramProfileMeta): Promise<InstagramProfileMeta> {
+    const pythonPath = join(process.cwd(), '..', '..', 'tools', 'python', 'python.exe');
+    const instaloaderScriptPath = join(process.cwd(), 'scripts', 'instaloader_profile_meta.py');
+    if (!existsSync(pythonPath) || !existsSync(instaloaderScriptPath)) {
+      return base;
+    }
+    if (base.profileWebsite && base.bio && base.fullName) {
+      return base;
+    }
+
+    try {
+      const { execFile } = await import('child_process');
+      const { promisify } = await import('util');
+      const execFileAsync = promisify(execFile);
+      const { stdout } = await execFileAsync(pythonPath, [instaloaderScriptPath, handle], {
+        cwd: process.cwd(),
+        timeout: 45000,
+        windowsHide: true,
+        maxBuffer: 1024 * 1024,
+      });
+      const payload = JSON.parse(stdout || '{}') as Partial<InstagramProfileMeta> & { exists?: boolean };
+      if (!payload.exists) {
+        return base;
+      }
+      return {
+        ...base,
+        fullName: base.fullName || payload.fullName || null,
+        bio: base.bio || payload.bio || null,
+        profileWebsite: base.profileWebsite || payload.profileWebsite || null,
+        hasPublicEmail: base.hasPublicEmail || Boolean(payload.hasPublicEmail),
+        followers: base.followers ?? payload.followers ?? null,
+        following: base.following ?? payload.following ?? null,
+        posts: base.posts ?? payload.posts ?? null,
+        verified: base.verified || Boolean(payload.verified),
+        category: base.category || payload.category || null,
+        profileImage: base.profileImage || payload.profileImage || null,
+      };
+    } catch {
+      return base;
+    }
   }
 
   private async collectLinksFromGrid(page: Page, url: string, limit: number, mode: 'post' | 'reel') {
@@ -371,6 +429,120 @@ export class InstagramPlaywrightService {
     return this.parseCompactNumber(value);
   }
 
+  private async extractRenderedProfileSignals(page: Page) {
+    return page.evaluate(() => {
+      const clean = (value?: string | null) => value?.replace(/\s+/g, ' ').trim() || null;
+      const unique = <T,>(items: T[]) => Array.from(new Set(items));
+      const isExternal = (href: string) =>
+        /^https?:\/\//i.test(href) &&
+        !/instagram\.com/i.test(href) &&
+        !/l\.instagram\.com\/\?/i.test(href);
+      const looksLikeCountLine = (text: string) =>
+        /followers|following|posts/i.test(text) ||
+        /^[\d.,KM]+\s+(posts|followers|following)$/i.test(text);
+      const looksLikeUiNoise = (text: string) =>
+        /^(verified|options|message|follow|threads|suggested for you|meta|link icon|shop now)$/i.test(text) ||
+        /^more$/i.test(text);
+      const looksLikeCategory = (text: string) =>
+        text.length < 60 &&
+        !looksLikeCountLine(text) &&
+        !looksLikeUiNoise(text) &&
+        /health|beauty|skincare|insurance|benefits|fashion|apparel|food|nutrition|wellness|education|software|travel|website|brand|product|store/i.test(text);
+
+        const anchors = Array.from(document.querySelectorAll('a[href]')) as HTMLAnchorElement[];
+        const directExternal = anchors
+          .map((anchor) => anchor.href)
+          .find((href) => isExternal(href));
+
+        const instagramRedirect = anchors
+          .map((anchor) => anchor.href)
+          .find((href) => /l\.instagram\.com\/\?/i.test(href));
+
+      let decodedRedirect: string | null = null;
+      if (instagramRedirect) {
+        try {
+          const url = new URL(instagramRedirect);
+          decodedRedirect = url.searchParams.get('u');
+        } catch {
+          decodedRedirect = null;
+        }
+      }
+
+        const header = document.querySelector('header');
+        const headerText = header?.innerText ?? '';
+        const bodyText = document.body.innerText ?? '';
+        const countText = `${headerText}\n${bodyText}`;
+        const countMatch = countText.match(/([\d.,KM]+)\s+posts?[\s\S]*?([\d.,KM]+)\s+followers[\s\S]*?([\d.,KM]+)\s+following/i)
+          ?? countText.match(/([\d.,KM]+)\s+followers[\s\S]*?([\d.,KM]+)\s+following[\s\S]*?([\d.,KM]+)\s+posts/i);
+
+        const fullName =
+          clean(header?.querySelector('h1')?.textContent)
+          ?? clean(header?.querySelector('h2')?.textContent)
+          ?? null;
+
+        const rawLines = unique(
+          (headerText || '')
+            .split('\n')
+            .map((line) => clean(line))
+            .filter(Boolean) as string[],
+        );
+
+        const filteredLines = rawLines.filter((line) => {
+          if (!line) return false;
+          if (looksLikeUiNoise(line)) return false;
+          if (looksLikeCountLine(line)) return false;
+          if (line.length > 140) return false;
+          if (/^@[a-z0-9._]+$/i.test(line)) return false;
+          if (/^[\d.,KM]+$/i.test(line)) return false;
+          if (fullName && line.toLowerCase() === fullName.toLowerCase()) return false;
+          if (/instagram|threads|see translation/i.test(line)) return false;
+          return true;
+        });
+
+        const categoryCandidate = filteredLines.find((line) => looksLikeCategory(line)) ?? null;
+
+        const websiteCandidateText = filteredLines.find((line) =>
+          /https?:\/\/|www\.|\.com|\.in|\.co|\.io|\.org|\.net|\.shop|\.store/i.test(line),
+        ) ?? null;
+
+        const bioLines = filteredLines.filter((line) => {
+          if (categoryCandidate && line === categoryCandidate) return false;
+          if (websiteCandidateText && line === websiteCandidateText) return false;
+          if (line.length < 4) return false;
+          return true;
+        }).slice(0, 6);
+
+        return {
+          profileWebsite: clean(decodedRedirect || directExternal || websiteCandidateText),
+          fullName,
+          bio: clean(bioLines.join('\n')),
+          category: clean(categoryCandidate),
+          followers: countMatch?.[2] ?? countMatch?.[1] ?? null,
+          following: countMatch?.[3] ?? countMatch?.[2] ?? null,
+          posts: countMatch?.[1] ?? countMatch?.[3] ?? null,
+          hasPublicEmail: /(^|\s)(email|contact)\b/i.test(countText),
+        };
+      }).then((result) => ({
+        profileWebsite: result.profileWebsite,
+        fullName: result.fullName,
+      bio: result.bio,
+      category: result.category,
+      followers: this.parseCompactNumber(result.followers),
+      following: this.parseCompactNumber(result.following),
+      posts: this.parseCompactNumber(result.posts),
+      hasPublicEmail: result.hasPublicEmail,
+    })).catch(() => ({
+      profileWebsite: null,
+      fullName: null,
+      bio: null,
+      category: null,
+      followers: null,
+      following: null,
+      posts: null,
+      hasPublicEmail: false,
+    }));
+  }
+
   private cleanText(value: string) {
     return value ? value.replace(/\\n/g, '\n').trim() : null;
   }
@@ -385,16 +557,26 @@ export class InstagramPlaywrightService {
   }
 
   private async withPage<T>(preferSession: boolean, run: (page: Page, usedSession: boolean) => Promise<T>): Promise<T> {
-    const browser = await chromium.launch({ headless: true });
+    let browser;
+    try {
+      browser = await chromium.launch({ headless: true });
+    } catch (error) {
+      console.error('Failed to launch Playwright browser:', error);
+      throw error; // Let the caller handle it, but we log it.
+    }
+
     let context: BrowserContext | null = null;
     try {
       const useSession = preferSession && this.hasSavedSession();
       context = await browser.newContext(useSession ? { storageState: this.storageStatePath } : {});
       const page = await context.newPage();
       return await run(page, useSession);
+    } catch (error) {
+      console.error('Error during Playwright page operation:', error);
+      throw error;
     } finally {
-      await context?.close().catch(() => undefined);
-      await browser.close().catch(() => undefined);
+      if (context) await context.close().catch(() => undefined);
+      if (browser) await browser.close().catch(() => undefined);
     }
   }
 

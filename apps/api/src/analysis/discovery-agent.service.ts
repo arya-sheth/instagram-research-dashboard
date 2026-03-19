@@ -1,4 +1,4 @@
-﻿import { Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import * as cheerio from 'cheerio';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
@@ -34,6 +34,14 @@ type DiscoveryCompetitor = {
     verified: boolean;
     posts: number | null;
   };
+  candidates?: Array<{
+    handle: string;
+    fullName: string | null;
+    bio: string | null;
+    followers: number | null;
+    verified: boolean;
+    score: number;
+  }>;
 };
 
 type DiscoveryResponse = {
@@ -54,6 +62,7 @@ type DiscoveryResponse = {
     searchQueries: string[];
     competitorCount: number;
     notes: string[];
+    needsConfirmation?: boolean;
   };
   competitors: DiscoveryCompetitor[];
 };
@@ -67,13 +76,14 @@ type SearchResult = {
 type CompanyCandidate = {
   name: string;
   website?: string;
+  instagramHandle?: string | null;
   snippets: string[];
   titles: string[];
   score: number;
   preferredFollowers?: number | null;
   preferredCategory?: string;
   preferredPositioning?: string;
-  source?: 'document' | 'seed' | 'web';
+  source?: 'csv' | 'document' | 'seed' | 'web';
 };
 
 type OfficialHandleAssessment = {
@@ -112,14 +122,24 @@ type BrandDocumentRecord = {
   verifiedHint: boolean;
 };
 
+type CsvBrandRecord = {
+  brand: string;
+  canonicalBrand: string;
+  instagramHandle: string | null;
+  domain: string;
+  proposition: string;
+};
+
 @Injectable()
 export class DiscoveryAgentService {
+  private readonly brandsExcelPath = join(process.cwd(), '..', '..', 'brands_with_unique_propositions.csv');
   private readonly documentPaths = [
     'C:\\Users\\aryaf\\Downloads\\India_D2C_Brand_Bible_With_Instagram.md',
     'C:\\Users\\aryaf\\Downloads\\Altera_Institute_Non_D2C_Recruiters_Instagram.md',
     join(process.cwd(), '..', '..', 'Downloads', 'India_D2C_Brand_Bible_With_Instagram.md'),
     join(process.cwd(), '..', '..', 'Downloads', 'Altera_Institute_Non_D2C_Recruiters_Instagram.md'),
   ];
+  private brandsCache: CsvBrandRecord[] | null = null;
   private documentBrandCache: BrandDocumentRecord[] | null = null;
 
   constructor(private readonly instagramPlaywrightService: InstagramPlaywrightService) {}
@@ -127,31 +147,91 @@ export class DiscoveryAgentService {
   async run(input: LiveInstagramResearchDto): Promise<DiscoveryResponse> {
     const exactHandle = input.instagramHandle.replace('@', '').trim();
     const targetMeta = await this.instagramPlaywrightService.scrapeProfileMeta(exactHandle, true);
-    const documentMatch = this.findDocumentBrand(input.companyName, exactHandle);
-    const categoryContext = this.inferCategoryContext(input, targetMeta.bio ?? '', targetMeta.category ?? '');
+
+    // If we have confirmed competitors from the user, we skip discovery and use them.
+    if (input.confirmedCompetitors) {
+      console.log(`[DiscoveryAgent] Resuming with confirmed competitors: ${input.confirmedCompetitors.length}`);
+      const resolvedCompetitors = await this.resolveConfirmedCompetitors(input.confirmedCompetitors, exactHandle);
+      console.log(`[DiscoveryAgent] Resolved ${resolvedCompetitors.length} competitors from confirmation.`);
+      return {
+        generatedAt: new Date().toISOString(),
+        sourceMode: 'agent-1-discovery-resumed',
+        target: {
+          inputCompanyName: input.companyName,
+          inputInstagramHandle: exactHandle,
+          resolvedInstagramHandle: exactHandle,
+          exactHandleMatch: true,
+          profileUrl: targetMeta.profileUrl,
+          bio: targetMeta.bio,
+          category: targetMeta.category,
+          followers: targetMeta.followers,
+          verified: targetMeta.verified,
+        },
+        discovery: {
+          searchQueries: [],
+          competitorCount: resolvedCompetitors.length,
+          notes: ['Research resumed with user-confirmed Instagram handles.'],
+          needsConfirmation: false,
+        },
+        competitors: resolvedCompetitors,
+      };
+    }
+    const excelMatch = this.findBrandInExcel(input.companyName, exactHandle);
+    const categoryContext = this.inferCategoryContext(
+      input,
+      targetMeta.bio ?? '',
+      targetMeta.category ?? '',
+      excelMatch?.domain,
+      excelMatch?.proposition,
+    );
+    console.log(`[DiscoveryAgent] Inferred Category: ${categoryContext.profile.label} (ID: ${categoryContext.profile.id})`);
     const seedCompanies = this.getIndustrySeedCompanies(categoryContext);
-    const requestedCompetitorCount = input.competitorLimit ?? 10;
+    const requestedCompetitorCount = input.competitorLimit ?? 4;
 
     const searchQueries = this.buildCompetitorQueries(input, targetMeta.bio ?? targetMeta.fullName ?? '', categoryContext);
-    const documentCompanies = documentMatch
-      ? this.getDocumentCompetitors(documentMatch, input.companyName, requestedCompetitorCount, targetMeta.followers ?? documentMatch.followers)
-      : [];
-    const webResults = documentCompanies.length
-      ? []
-      : await this.collectSearchResults(searchQueries);
-    const fallbackCompanies = documentCompanies.length
-      ? documentCompanies
-      : this.extractCompetitorCompanies(input.companyName, targetMeta.bio ?? '', webResults, input);
-    const discoveredCompanies = this.mergeCompanyCandidates(
-      fallbackCompanies,
-      input.companyName,
-    );
-    const resolvedCompetitors = await this.resolveInstagramHandles(
+    const csvCompanies = excelMatch
+      ? this.getCsvCompetitors(excelMatch, input.companyName, requestedCompetitorCount)
+      : this.getCompetitorsByDomain(categoryContext.profile.label, input.companyName, requestedCompetitorCount);
+
+    const docBrand = this.findDocumentBrand(input.companyName, exactHandle);
+    const docCompanies = docBrand ? this.getDocumentCompetitors(docBrand, input.companyName, requestedCompetitorCount, targetMeta.followers) : [];
+
+    const discoveryLimit = 15; // User target: 10-15 internal candidates
+    const showcaseLimit = requestedCompetitorCount;
+
+    const allLibraryCompanies = [...csvCompanies, ...docCompanies];
+
+    const discoveredCompanies = allLibraryCompanies.length > 0
+      ? this.mergeCompanyCandidates(allLibraryCompanies, input.companyName)
+      : this.mergeCompanyCandidates(
+          this.extractCompetitorCompanies(input.companyName, targetMeta.bio ?? '', await this.collectSearchResults(searchQueries), input),
+          input.companyName
+        );
+    
+    console.log(`[DiscoveryAgent] Discovered ${discoveredCompanies.length} potential company candidates.`);
+
+    // Resolve up to 15 candidates to find the best 4P fits
+    const resolvedCandidates = await this.resolveInstagramHandles(
       discoveredCompanies,
       exactHandle,
-      requestedCompetitorCount,
+      discoveryLimit,
       categoryContext,
     );
+
+    console.log(`[DiscoveryAgent] Resolved ${resolvedCandidates.length} Instagram handles.`);
+    resolvedCandidates.forEach((c, i) => {
+      console.log(`   ${i+1}. ${c.companyName} - Total 4P Score: ${c.scoring?.total ?? 0} (Handle: @${c.officialInstagramHandle || 'none'})`);
+    });
+
+    // Rank by 4P Total Score (stored in resolvedCandidates[i].scoring.total)
+    const rankedCompetitors = resolvedCandidates
+      .filter((c) => c.officialInstagramHandle || (c.candidates && c.candidates.length > 0)) // Keep those with at least handle candidates
+      .sort((a, b) => (b.scoring?.total ?? 0) - (a.scoring?.total ?? 0));
+
+    const needsConfirmation = rankedCompetitors.some((c) => !c.officialInstagramHandle && c.candidates && c.candidates.length > 0);
+
+    // Showcase ONLY the top 4 (or requested limit) to the user
+    const finalCompetitors = rankedCompetitors.slice(0, showcaseLimit);
 
     return {
       generatedAt: new Date().toISOString(),
@@ -169,24 +249,24 @@ export class DiscoveryAgentService {
       },
       discovery: {
         searchQueries,
-        competitorCount: resolvedCompetitors.length,
+        competitorCount: finalCompetitors.length,
         notes: [
           'Agent 1 is anchored on the exact Instagram username you pasted.',
           targetMeta.loginWall
             ? 'Public profile metadata was captured without deep login access. Deep media collection requires a saved Instagram session.'
             : 'Target profile metadata was captured directly from Instagram through the free local collector.',
-          documentMatch
-            ? `Primary competitor source came from your brand document: ${documentMatch.source === 'd2c-bible' ? 'India D2C Brand Bible' : 'Altera non-D2C recruiter list'}.`
-            : 'Brand was not found in the local brand documents, so fallback web discovery was used.',
-          `Free category engine inferred the brand category as: ${categoryContext.summary}`,
-          documentCompanies.length
-            ? 'Known-brand competitors were taken from the matching document section, but their Instagram IDs were re-resolved live from similar account candidates.'
-            : 'Competitor names were discovered from category-aware public web signals plus category seeds before Instagram-handle validation.',
-          'Competitor discovery is India-first and scores brands using Product, ASP/pricing fit, Place, Promotion, and target-market overlap.',
-          'Only business/brand-looking Instagram accounts are kept for downstream collection.',
+          (csvCompanies.length || docCompanies.length)
+            ? 'Primary competitor source came from your local brand library (CSV/MD).'
+            : 'Brand was not found in the local library, so fallback web discovery (15 candidates) was used.',
+          `Free category engine inferred the brand category as: ${categoryContext.profile.label}`,
+          (csvCompanies.length || docCompanies.length)
+            ? 'Known-brand competitors and their Instagram IDs were taken strictly from the library list. No live Instagram handle guessing was used for those competitors.'
+            : '15 candidates were discovered from web signals and ranked by 4Ps (Product, Price, Place, Promotion).',
+          'Only the top-scoring business/brand profiles are showcased for downstream analysis.',
         ],
+        needsConfirmation,
       },
-      competitors: resolvedCompetitors,
+      competitors: finalCompetitors,
     };
   }
 
@@ -198,15 +278,22 @@ export class DiscoveryAgentService {
       `${input.companyName} competitors india`,
       `${input.companyName} alternatives india`,
       `${input.companyName} brands similar to ${categoryContext.profile.label} india`.trim(),
-      `top ${keywords} companies india`.trim(),
+      `top 10 brands in ${categoryContext.profile.label} india`.trim(),
+      `popular ${keywords} companies india`.trim(),
       `${input.companyName} vs competitors india ${keywords}`.trim(),
       `${input.companyName} pricing alternatives india ${keywords}`.trim(),
-      `${keywords} brands india`.trim(),
+      `${keywords} brands d2c india`.trim(),
     ];
   }
 
-  private inferCategoryContext(input: LiveInstagramResearchDto, targetBio: string, targetCategory: string): CategoryContext {
-    const text = `${input.companyName} ${input.industry ?? ''} ${targetBio} ${targetCategory}`.toLowerCase();
+  private inferCategoryContext(
+    input: LiveInstagramResearchDto,
+    targetBio: string,
+    targetCategory: string,
+    documentCategory?: string | null,
+    documentPositioning?: string | null,
+  ): CategoryContext {
+    const text = `${input.companyName} ${input.industry ?? ''} ${targetBio} ${targetCategory} ${documentCategory ?? ''} ${documentPositioning ?? ''}`.toLowerCase();
     const profiles = this.getCategoryProfiles();
     const scored = profiles.map((profile) => {
       const matchedKeywords = profile.keywords.filter((keyword) => text.includes(keyword));
@@ -228,7 +315,7 @@ export class DiscoveryAgentService {
       return scored[0];
     }
 
-    const genericKeywords = this.extractKeywords(text).slice(0, 8);
+      const genericKeywords = this.extractKeywords(text).slice(0, 8);
     return {
       profile: {
         id: 'generic-brand-business',
@@ -251,8 +338,12 @@ export class DiscoveryAgentService {
   private async collectSearchResults(queries: string[]) {
     const results: SearchResult[] = [];
     for (const query of queries) {
-      const items = await this.searchWeb(query).catch(() => [] as SearchResult[]);
+      const items = await this.searchWeb(query).catch((err) => {
+        console.error(`[DiscoveryAgent] Search failed for query "${query}":`, err.message);
+        return [] as SearchResult[];
+      });
       results.push(...items);
+      await new Promise((resolve) => setTimeout(resolve, 1000)); // Increased delay to prevent AbortError
     }
     return results;
   }
@@ -264,8 +355,9 @@ export class DiscoveryAgentService {
     for (const candidate of candidates) {
       const canonical = this.normalizeCompanyName(candidate.name);
       if (!canonical || canonical.toLowerCase() === normalizedTarget) continue;
-      const existing = merged.get(canonical) ?? { name: canonical, website: candidate.website, snippets: [], titles: [], score: 0 };
+      const existing = merged.get(canonical) ?? { name: canonical, website: candidate.website, instagramHandle: candidate.instagramHandle, snippets: [], titles: [], score: 0 };
       existing.website = existing.website ?? candidate.website;
+      existing.instagramHandle = existing.instagramHandle ?? candidate.instagramHandle;
       existing.score = Math.max(existing.score, candidate.score);
       existing.preferredFollowers = existing.preferredFollowers ?? candidate.preferredFollowers;
       existing.preferredCategory = existing.preferredCategory ?? candidate.preferredCategory;
@@ -285,6 +377,7 @@ export class DiscoveryAgentService {
       ...this.extractKeywords(companyName),
       'india', 'pricing', 'price', 'competitors', 'competitor', 'alternatives', 'alternative', 'companies', 'company',
       'employee', 'employees', 'benefits', 'benefit', 'health', 'insurance', 'instagram', 'official', 'blog', 'linkedin',
+      'founder', 'founders', 'co-founder', 'ceo', 'cto', 'born', 'born in', 'alumni', 'hails from', 'graduate',
     ]);
 
     const candidates = new Map<string, CompanyCandidate>();
@@ -323,6 +416,30 @@ export class DiscoveryAgentService {
     return categoryContext.profile.seeds;
   }
 
+  private enrichDocumentCompaniesWithSeedWebsites(
+    companies: CompanyCandidate[],
+    seeds: Array<{ name: string; website?: string; score: number; reason: string }>,
+    companyName: string,
+  ) {
+    const seedMap = new Map(
+      seeds.map((seed) => [this.normalizeCompanyName(seed.name).toLowerCase(), seed]),
+    );
+
+    const enriched = companies.map((company) => {
+      const seed = seedMap.get(this.normalizeCompanyName(company.name).toLowerCase());
+      if (!seed) return company;
+      return {
+        ...company,
+        website: company.website ?? seed.website,
+        snippets: [...company.snippets, seed.reason],
+        titles: [...company.titles, `${seed.reason} ${company.name}`],
+        score: Math.max(company.score, seed.score + 14),
+      };
+    });
+
+    return this.mergeCompanyCandidates(enriched, companyName);
+  }
+
   private async resolveInstagramHandles(
     companies: CompanyCandidate[],
     targetHandle: string,
@@ -334,6 +451,58 @@ export class DiscoveryAgentService {
 
     for (const company of companies) {
       if (resolved.length >= limit) break;
+      if (company.source === 'csv' && company.instagramHandle) {
+        const listedHandle = company.instagramHandle.replace('@', '').trim();
+        if (listedHandle && !seen.has(listedHandle.toLowerCase()) && listedHandle.toLowerCase() !== targetHandle.toLowerCase()) {
+          const meta = await this.instagramPlaywrightService.scrapeProfileMeta(listedHandle, true).catch(() => null);
+          const scoring = this.scoreCompetitorFit(meta ?? {
+            handle: listedHandle,
+            profileUrl: `https://www.instagram.com/${listedHandle}/`,
+            title: `${listedHandle} • Instagram`,
+            fullName: null,
+            bio: null,
+            profileWebsite: null,
+            hasPublicEmail: false,
+            followers: null,
+            following: null,
+            posts: null,
+            verified: false,
+            category: null,
+            profileImage: null,
+            loginWall: false,
+            exists: true,
+            usedSession: this.instagramPlaywrightService.hasSavedSession(),
+          }, company, categoryContext);
+          const confidence = this.round(Math.min(1, 0.82 + Math.min(0.12, scoring.total / 100)));
+          resolved.push({
+            companyName: company.name,
+            canonicalName: this.normalizeCompanyName(company.name),
+            officialInstagramHandle: listedHandle,
+            instagramProfileUrl: `https://www.instagram.com/${listedHandle}/`,
+            confidence,
+            confidenceLabel: confidence >= 0.75 ? 'high' : 'medium',
+            officialSignals: ['instagram id from master csv'],
+            whyItMatched: [
+              `Competitor came from the CSV list in the same domain: ${company.preferredCategory ?? 'same domain'}.`,
+              company.preferredPositioning
+                ? `Proposition overlap matched: ${company.preferredPositioning}.`
+                : 'Competitor proposition overlapped with the target brand within the CSV domain.',
+            ],
+            website: company.website,
+            scoring,
+            instagramProfile: meta ? {
+              fullName: meta.fullName,
+              bio: meta.bio,
+              category: meta.category,
+              followers: meta.followers,
+              verified: meta.verified,
+              posts: meta.posts,
+            } : undefined,
+          });
+          seen.add(listedHandle.toLowerCase());
+          continue;
+        }
+      }
       const resolvedWebsite = await this.resolveCompanyWebsite(company).catch(() => company.website);
       company.website = resolvedWebsite ?? company.website;
       const websiteRoot = company.website ? this.domainRoot(company.website) : '';
@@ -344,8 +513,13 @@ export class DiscoveryAgentService {
         this.searchInstagramHandles(`site:instagram.com "${company.name}" official instagram india`).catch(() => [] as string[]),
         this.searchInstagramHandles(`site:instagram.com "${company.name}" instagram india`).catch(() => [] as string[]),
         this.searchInstagramHandles(`site:instagram.com "${company.name}"`).catch(() => [] as string[]),
+        this.searchInstagramHandles(`site:instagram.com "${company.name}" official`).catch(() => [] as string[]),
+        this.searchInstagramHandles(`site:instagram.com "${company.name}" brand`).catch(() => [] as string[]),
         websiteRoot
           ? this.searchInstagramHandles(`site:instagram.com "${websiteRoot}" instagram`).catch(() => [] as string[])
+          : Promise.resolve([] as string[]),
+        websiteRoot
+          ? this.searchInstagramHandles(`site:instagram.com "${websiteRoot}"`).catch(() => [] as string[])
           : Promise.resolve([] as string[]),
       ]);
       const handleCandidates = this.rankHandleCandidates(
@@ -358,8 +532,50 @@ export class DiscoveryAgentService {
         ),
         company.name,
         company.website,
-      ).slice(0, 4);
-      if (!handleCandidates.length) continue;
+      ).slice(0, company.source === 'document' ? 80 : 30);
+      if (!handleCandidates.length) {
+        const unresolvedScoring = this.scoreCompetitorFit({
+          handle: '',
+          profileUrl: '',
+          title: company.name,
+          fullName: company.name,
+          bio: `${company.snippets.join(' ')} ${company.titles.join(' ')}`.trim(),
+          profileWebsite: company.website ?? null,
+          hasPublicEmail: false,
+          followers: company.preferredFollowers ?? null,
+          following: null,
+          posts: null,
+          verified: false,
+          category: company.preferredCategory ?? null,
+          profileImage: null,
+          loginWall: false,
+          exists: false,
+          usedSession: this.instagramPlaywrightService.hasSavedSession(),
+        }, company, categoryContext);
+        const fallbackCandidates = this.companyNameToHandleCandidates(company.name, company.website).slice(0, 3).map((handle, index) => ({
+          handle,
+          fullName: null,
+          bio: null,
+          followers: null,
+          verified: false,
+          score: Math.max(1, 3 - index),
+        }));
+
+        resolved.push({
+          companyName: company.name,
+          canonicalName: this.normalizeCompanyName(company.name),
+          officialInstagramHandle: null,
+          instagramProfileUrl: null,
+          confidence: 0,
+          confidenceLabel: 'low',
+          officialSignals: ['no instagram handle candidates found'],
+          whyItMatched: ['Competitor brand was discovered, but no reliable Instagram username candidates were found yet.'],
+          website: company.website,
+          scoring: unresolvedScoring,
+          candidates: fallbackCandidates.length ? fallbackCandidates : undefined,
+        });
+        continue;
+      }
 
       const evaluated: Array<{
         handle: string;
@@ -367,9 +583,16 @@ export class DiscoveryAgentService {
         score: number;
         signals: string[];
       }> = [];
+      let matchedDocumentWebsiteCandidate: {
+        handle: string;
+        meta: Awaited<ReturnType<InstagramPlaywrightService['scrapeProfileMeta']>>;
+        score: number;
+        signals: string[];
+      } | null = null;
       for (const handle of handleCandidates) {
         if (seen.has(handle.toLowerCase()) || handle.toLowerCase() === targetHandle.toLowerCase()) continue;
-        const meta = await this.instagramPlaywrightService.scrapeProfileMeta(handle, false).catch(() => null);
+        await this.delay(company.source === 'document' ? 300 : 150);
+        const meta = await this.instagramPlaywrightService.scrapeProfileMeta(handle, true).catch(() => null);
         if (!meta?.exists) continue;
         const assessment = this.evaluateOfficialBrandProfile(
           meta,
@@ -378,41 +601,143 @@ export class DiscoveryAgentService {
           company.score,
           websiteHandles.some((item) => item.toLowerCase() === meta.handle.toLowerCase()),
         );
-        evaluated.push({ handle, meta, score: assessment.totalScore, signals: assessment.signals });
+        const evaluation = { handle, meta, score: assessment.totalScore, signals: assessment.signals };
+        evaluated.push(evaluation);
+        if (company.source === 'document' && this.profileWebsiteMatchesCompanyWebsite(meta.profileWebsite, company.website)) {
+          matchedDocumentWebsiteCandidate = evaluation;
+          break;
+        }
       }
 
       const withWebsite = evaluated.filter((entry) => Boolean(entry.meta.profileWebsite));
       const withEmail = evaluated.filter((entry) => entry.meta.hasPublicEmail);
-      const best = withWebsite
-        .filter((entry) => entry.score >= 6)
-        .sort((a, b) => b.score - a.score)[0]
-        ?? withWebsite
-          .filter((entry) => this.hasStrongOfficialSignal(entry.meta, company.name, company.website))
-          .sort((a, b) => b.score - a.score)[0]
-        ?? withWebsite
-          .sort((a, b) => b.score - a.score)[0]
-        ?? withEmail
-          .filter((entry) => entry.score >= 6)
-          .sort((a, b) => b.score - a.score)[0]
-        ?? withEmail
-          .filter((entry) => this.hasStrongOfficialSignal(entry.meta, company.name, company.website))
-          .sort((a, b) => b.score - a.score)[0]
-        ?? withEmail
-          .sort((a, b) => b.score - a.score)[0]
-        ?? evaluated
-          .filter((entry) => this.hasStrongOfficialSignal(entry.meta, company.name, company.website) && entry.score >= 8)
-          .sort((a, b) => b.score - a.score)[0]
-        ?? evaluated
-          .filter((entry) => entry.score >= 10)
-          .sort((a, b) => b.score - a.score)[0]
-        ?? evaluated
-          .filter((entry) => entry.score >= 10 && websiteHandles.some((item) => item.toLowerCase() === entry.meta.handle.toLowerCase()))
-          .sort((a, b) => b.score - a.score)[0];
-      if (!best) continue;
+      const linkedFromOfficialWebsite = evaluated
+        .filter((entry) => websiteHandles.some((item) => item.toLowerCase() === entry.meta.handle.toLowerCase()))
+        .sort((a, b) => b.score - a.score)[0];
+      const exactWebsiteMatch = matchedDocumentWebsiteCandidate ?? withWebsite
+        .filter((entry) => this.profileWebsiteMatchesCompanyWebsite(entry.meta.profileWebsite, company.website))
+        .sort((a, b) => b.score - a.score)[0];
+      const best = company.source === 'document'
+        ? exactWebsiteMatch ?? linkedFromOfficialWebsite
+        : withWebsite
+            .filter((entry) => entry.score >= 6)
+            .sort((a, b) => b.score - a.score)[0]
+          ?? withWebsite
+            .filter((entry) => this.hasStrongOfficialSignal(entry.meta, company.name, company.website))
+            .sort((a, b) => b.score - a.score)[0]
+          ?? withWebsite
+            .sort((a, b) => b.score - a.score)[0]
+          ?? withEmail
+            .filter((entry) => entry.score >= 6)
+            .sort((a, b) => b.score - a.score)[0]
+          ?? withEmail
+            .filter((entry) => this.hasStrongOfficialSignal(entry.meta, company.name, company.website))
+            .sort((a, b) => b.score - a.score)[0]
+          ?? withEmail
+            .sort((a, b) => b.score - a.score)[0]
+          ?? evaluated
+            .filter((entry) => this.hasStrongOfficialSignal(entry.meta, company.name, company.website) && entry.score >= 8)
+            .sort((a, b) => b.score - a.score)[0]
+          ?? evaluated
+            .filter((entry) => entry.score >= 10)
+            .sort((a, b) => b.score - a.score)[0]
+          ?? evaluated
+            .filter((entry) => entry.score >= 10 && websiteHandles.some((item) => item.toLowerCase() === entry.meta.handle.toLowerCase()))
+            .sort((a, b) => b.score - a.score)[0];
+      if (!best) {
+        const topCandidates = evaluated
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 3)
+          .map(c => ({
+            handle: c.handle,
+            fullName: c.meta.fullName,
+            bio: c.meta.bio,
+            followers: c.meta.followers,
+            verified: c.meta.verified,
+            score: c.score,
+          }));
+        const fallbackCandidates = topCandidates.length > 0
+          ? topCandidates
+          : handleCandidates.slice(0, 3).map((handle, index) => ({
+              handle,
+              fullName: null,
+              bio: null,
+              followers: null,
+              verified: false,
+              score: Math.max(1, 3 - index),
+            }));
+        const unresolvedScoring = this.scoreCompetitorFit({
+          handle: '',
+          profileUrl: '',
+          title: company.name,
+          fullName: company.name,
+          bio: `${company.snippets.join(' ')} ${company.titles.join(' ')}`.trim(),
+          profileWebsite: company.website ?? null,
+          hasPublicEmail: false,
+          followers: company.preferredFollowers ?? null,
+          following: null,
+          posts: null,
+          verified: false,
+          category: company.preferredCategory ?? null,
+          profileImage: null,
+          loginWall: false,
+          exists: false,
+          usedSession: this.instagramPlaywrightService.hasSavedSession(),
+        }, company, categoryContext);
+
+        resolved.push({
+          companyName: company.name,
+          canonicalName: this.normalizeCompanyName(company.name),
+          officialInstagramHandle: null,
+          instagramProfileUrl: null,
+          confidence: 0,
+          confidenceLabel: 'low',
+          officialSignals: ['no confident instagram match found'],
+          whyItMatched: ['No Instagram profile clearly showed the competitor’s official website or met official-brand criteria.'],
+          website: company.website,
+          scoring: unresolvedScoring,
+          candidates: fallbackCandidates,
+        });
+        continue;
+      }
 
       const scoring = this.scoreCompetitorFit(best.meta, company, categoryContext);
       const totalConfidence = this.round(Math.min(1, (best.score + scoring.total) / 26));
+
       if (!this.isAcceptedCompetitor(best.signals, best.score, totalConfidence, company.source === 'document')) {
+        const topCandidates = evaluated
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 3)
+          .map(c => ({
+            handle: c.handle,
+            fullName: c.meta.fullName,
+            bio: c.meta.bio,
+            followers: c.meta.followers,
+            verified: c.meta.verified,
+            score: c.score,
+          }));
+
+        resolved.push({
+          companyName: company.name,
+          canonicalName: this.normalizeCompanyName(company.name),
+          officialInstagramHandle: null,
+          instagramProfileUrl: null,
+          confidence: totalConfidence,
+          confidenceLabel: 'low',
+          officialSignals: ['instagram candidate rejected by official-account checks'],
+          whyItMatched: ['Instagram candidates were found but were too weak to accept confidently without user feedback.'],
+          website: company.website,
+          scoring,
+          instagramProfile: {
+            fullName: best.meta.fullName,
+            bio: best.meta.bio,
+            category: best.meta.category,
+            followers: best.meta.followers,
+            verified: best.meta.verified,
+            posts: best.meta.posts,
+          },
+          candidates: topCandidates.length > 0 ? topCandidates : undefined,
+        });
         continue;
       }
       resolved.push({
@@ -445,12 +770,16 @@ export class DiscoveryAgentService {
     const hasWebsiteProof = signals.some((signal) => /linked from official website|profile website matches brand domain|brand domain visible in bio/i.test(signal));
     const hasEmailProof = signals.some((signal) => /public contact email is present/i.test(signal));
     const hasNameProof = signals.some((signal) => /exact username match|username contains brand name|profile full name matches brand/i.test(signal));
+    const hasDomainStrength = signals.some((signal) => /profile website matches brand domain|brand domain visible in bio|linked from official website/i.test(signal));
+    const hasReasonableNameStrength = signals.some((signal) => /username contains brand name|profile full name matches brand|exact username match/i.test(signal));
     const onlyWeakNameMatch = signals.length === 1 && /exact username match/i.test(signals[0]);
 
     if (onlyWeakNameMatch) return false;
     if (hasWebsiteProof) return confidence >= 0.58;
     if (hasEmailProof && hasNameProof) return confidence >= 0.62;
-    if (fromKnownList && hasNameProof && rawScore >= 14) return confidence >= 0.68;
+    if (fromKnownList && hasDomainStrength && hasReasonableNameStrength && rawScore >= 10) return confidence >= 0.45;
+    if (fromKnownList && hasNameProof && rawScore >= 12) return confidence >= 0.52;
+    if (fromKnownList && rawScore >= 16 && hasReasonableNameStrength) return confidence >= 0.42;
     return false;
   }
 
@@ -507,13 +836,83 @@ export class DiscoveryAgentService {
     categoryContext: CategoryContext,
   ) {
     const text = `${meta.fullName ?? ''} ${meta.bio ?? ''} ${company.snippets.join(' ')} ${company.titles.join(' ')}`.toLowerCase();
-    const productSimilarity = this.scoreByKeywords(text, categoryContext.profile.productKeywords, 5);
-    const targetMarketFit = this.scoreByKeywords(text, categoryContext.profile.targetMarketKeywords, 5);
-    const aspFit = this.scoreByKeywords(text, categoryContext.profile.aspKeywords, 4);
-    const placeFit = this.scoreByKeywords(text, categoryContext.profile.placeKeywords, 4);
-    const promotionFit = this.scoreByKeywords(text, categoryContext.profile.promotionKeywords, 4);
-    const total = productSimilarity + targetMarketFit + aspFit + placeFit + promotionFit + Math.min(4, Math.floor(company.score / 5));
+    
+    // Strict 4P Ranking Parameters
+    const productSimilarity = this.scoreByKeywords(text, categoryContext.profile.productKeywords, 10); // Product
+    const targetMarketFit = this.scoreByKeywords(text, categoryContext.profile.targetMarketKeywords, 8); // Place (Target)
+    const aspFit = this.scoreByKeywords(text, categoryContext.profile.aspKeywords, 8);               // Price
+    const placeFit = this.scoreByKeywords(text, categoryContext.profile.placeKeywords, 7);           // Place
+    const promotionFit = this.scoreByKeywords(text, categoryContext.profile.promotionKeywords, 6);   // Promotion
+    
+    let total = productSimilarity + targetMarketFit + aspFit + placeFit + promotionFit;
+
+    // Founder/Personal Account Penalty (Ensuring only Business Brands stay in top 4)
+    if (/(founder|ceo|owner|entrepreneur|co-founder|founder of|hails from)/i.test(text)) {
+      total -= 20;
+    }
+
+    // Reward web signals (if multiple sources confirmed it)
+    total += Math.min(5, Math.floor(company.score / 4));
+
     return { productSimilarity, targetMarketFit, aspFit, placeFit, promotionFit, total };
+  }
+
+  private async resolveConfirmedCompetitors(confirmed: Array<{ companyName: string; handle: string }>, targetHandle: string): Promise<DiscoveryCompetitor[]> {
+    const resolved: DiscoveryCompetitor[] = [];
+    const categoryContext = { profile: { label: 'confirmed', id: 'confirmed' } } as any;
+    for (const item of confirmed) {
+      try {
+        const handle = (item.handle || '').replace('@', '').trim();
+        console.log(`[DiscoveryAgent] Resolving confirmed competitor: ${item.companyName} (@${handle})`);
+        
+        const meta = await this.instagramPlaywrightService.scrapeProfileMeta(handle, true).catch((err) => {
+          console.error(`[DiscoveryAgent] Failed to scrape meta for ${handle}:`, err.message);
+          return null;
+        });
+        
+        const competitor: CompanyCandidate = {
+          name: item.companyName,
+          instagramHandle: handle,
+          snippets: [],
+          titles: [],
+          score: 100,
+          source: 'web', // Placeholder for type compatibility
+        };
+
+        const scoring = meta ? this.scoreCompetitorFit(meta, competitor, categoryContext) : {
+          productSimilarity: 20,
+          targetMarketFit: 20,
+          aspFit: 20,
+          placeFit: 20,
+          promotionFit: 20,
+          total: 100,
+        };
+
+        resolved.push({
+          companyName: item.companyName,
+          canonicalName: this.normalizeCompanyName(item.companyName),
+          officialInstagramHandle: handle,
+          instagramProfileUrl: `https://www.instagram.com/${handle}/`,
+          confidence: 1,
+          confidenceLabel: 'high',
+          officialSignals: ['user-confirmed'],
+          whyItMatched: ['This competitor handle was explicitly confirmed by you.'],
+          scoring,
+          instagramProfile: meta ? {
+            fullName: meta.fullName,
+            bio: meta.bio,
+            category: meta.category,
+            followers: meta.followers,
+            verified: meta.verified,
+            posts: meta.posts,
+          } : undefined,
+        });
+      } catch (err) {
+        console.error(`[DiscoveryAgent] Critical error resolving ${item.companyName}:`, err);
+      }
+    }
+
+    return resolved;
   }
 
   private buildWhyItMatched(meta: Awaited<ReturnType<InstagramPlaywrightService['scrapeProfileMeta']>>, company: CompanyCandidate, scoring: DiscoveryScoring) {
@@ -578,6 +977,16 @@ export class DiscoveryAgentService {
     if (/(fan|review|ratings|community|club|unofficial)/i.test(bio)) {
       totalScore -= 10;
       signals.push('bio looks like fan or review page');
+    }
+
+    if (/(entrepreneur|public figure|author|artist|personal blog|video creator|influencer|founder)/i.test(meta.category ?? '')) {
+      totalScore -= 15;
+      signals.push('category indicates a person/creator rather than a brand');
+    }
+
+    if (meta.category && /(company|brand|product|service|e-commerce|shopping|retail|restaurant|food)/i.test(meta.category)) {
+      totalScore += 5;
+      signals.push('category matches business/brand profile');
     }
 
     if (websiteRoot && profileWebsiteRoot && websiteRoot === profileWebsiteRoot) {
@@ -658,29 +1067,34 @@ export class DiscoveryAgentService {
   }
 
   private async searchWeb(query: string) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    const response = await fetch(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timeout);
-    if (!response.ok) throw new Error(`Search request failed with ${response.status}`);
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    const results: SearchResult[] = [];
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000); // Increased timeout to 15s
+      const response = await fetch(`https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!response.ok) return [];
+      const html = await response.text();
+      const $ = cheerio.load(html);
+      const results: SearchResult[] = [];
 
-    $('.result').each((_, element) => {
-      const title = $(element).find('.result__title').text().trim() || $(element).find('.result__a').text().trim();
-      const snippet = $(element).find('.result__snippet').text().trim();
-      const href = $(element).find('.result__a').attr('href') ?? '';
-      const url = this.decodeDuckDuckGoUrl(href);
-      if (title && url) results.push({ title, snippet, url });
-    });
+      $('.result').each((_, element) => {
+        const title = $(element).find('.result__title').text().trim() || $(element).find('.result__a').text().trim();
+        const snippet = $(element).find('.result__snippet').text().trim();
+        const href = $(element).find('.result__a').attr('href') ?? '';
+        const url = this.decodeDuckDuckGoUrl(href);
+        if (title && url) results.push({ title, snippet, url });
+      });
 
-    return results.slice(0, 10);
+      return results.slice(0, 10);
+    } catch (error) {
+      console.error(`Search request failed for query "${query}":`, error);
+      return [];
+    }
   }
 
   private async searchInstagramHandles(query: string) {
@@ -695,31 +1109,34 @@ export class DiscoveryAgentService {
   }
 
   private async fetchInstagramHandlesFromWebsite(website: string) {
-    const response = await fetch(website, {
-      headers: {
-        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-      },
-    });
-    if (!response.ok) {
-      throw new Error(`Website fetch failed with ${response.status}`);
+    try {
+      const response = await fetch(website, {
+        headers: {
+          'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        },
+      });
+      if (!response.ok) return [];
+
+      const html = await response.text();
+      const $ = cheerio.load(html);
+      const handles = new Set<string>();
+
+      $('a[href*="instagram.com/"]').each((_, element) => {
+        const href = $(element).attr('href') ?? '';
+        const handle = href.match(/instagram\.com\/([A-Za-z0-9._]+)\/?/i)?.[1];
+        if (handle && !this.isLikelyGenericPath(handle)) handles.add(handle);
+      });
+
+      for (const match of html.matchAll(/instagram\.com\/([A-Za-z0-9._]+)\/?/gi)) {
+        const handle = match[1];
+        if (handle && !this.isLikelyGenericPath(handle)) handles.add(handle);
+      }
+
+      return Array.from(handles);
+    } catch (error) {
+      console.error(`Website fetch failed for "${website}":`, error);
+      return [];
     }
-
-    const html = await response.text();
-    const $ = cheerio.load(html);
-    const handles = new Set<string>();
-
-    $('a[href*="instagram.com/"]').each((_, element) => {
-      const href = $(element).attr('href') ?? '';
-      const handle = href.match(/instagram\.com\/([A-Za-z0-9._]+)\/?/i)?.[1];
-      if (handle && !this.isLikelyGenericPath(handle)) handles.add(handle);
-    });
-
-    for (const match of html.matchAll(/instagram\.com\/([A-Za-z0-9._]+)\/?/gi)) {
-      const handle = match[1];
-      if (handle && !this.isLikelyGenericPath(handle)) handles.add(handle);
-    }
-
-    return Array.from(handles);
   }
 
   private findDocumentBrand(companyName: string, handle: string) {
@@ -730,6 +1147,84 @@ export class DiscoveryAgentService {
       brand.canonicalBrand === canonicalCompany
       || (brand.instagramHandle ? brand.instagramHandle.toLowerCase() === normalizedHandle : false),
     ) ?? null;
+  }
+
+  private findBrandInExcel(companyName: string, handle: string) {
+    const brands = this.loadBrandsFromExcel();
+    const canonicalCompany = this.normalizeCompanyName(companyName).toLowerCase();
+    const normalizedHandle = handle.replace('@', '').trim().toLowerCase();
+    return brands.find((brand) =>
+      brand.canonicalBrand === canonicalCompany
+      || (brand.instagramHandle ? brand.instagramHandle.toLowerCase() === normalizedHandle : false),
+    ) ?? null;
+  }
+
+  private getCsvCompetitors(target: CsvBrandRecord, companyName: string, limit: number): CompanyCandidate[] {
+    const brands = this.loadBrandsFromExcel();
+    const sameDomain = brands
+      .filter((record) => record.domain === target.domain && record.canonicalBrand !== target.canonicalBrand)
+      .map((record) => {
+        const propositionScore = this.scoreCsvPropositionFit(target.proposition, record.proposition);
+        return {
+          name: this.normalizeCompanyName(record.brand),
+          instagramHandle: record.instagramHandle,
+          snippets: [record.proposition, record.domain],
+          titles: [`${record.domain} ${record.brand}`],
+          score: 20 + propositionScore,
+          preferredCategory: record.domain,
+          preferredPositioning: record.proposition,
+          source: 'csv' as const,
+        };
+      })
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.name.localeCompare(b.name);
+      })
+      .slice(0, Math.max(limit * 3, 30));
+
+    return this.mergeCompanyCandidates(sameDomain, companyName).slice(0, limit);
+  }
+
+  private getCompetitorsByDomain(domainLabel: string, companyName: string, limit: number): CompanyCandidate[] {
+    const brands = this.loadBrandsFromExcel();
+    const normalizedDomain = domainLabel.toLowerCase();
+    
+    // Map inferred label to CSV domain keywords
+    // We split by / and space to get broader keywords
+    const searchTerms = domainLabel.toLowerCase()
+      .split(/[\/\s,]+/)
+      .filter(t => t.length > 3 && !['brand', 'business', 'lifestyle', 'products', 'india'].includes(t));
+
+    const matches = brands
+      .filter((record) => {
+        const d = (record.domain || '').toLowerCase();
+        // Match if domain contains any of the label keywords
+        return searchTerms.some(term => d.includes(term)) || d.includes(normalizedDomain) || normalizedDomain.includes(d);
+      })
+      .map((record) => {
+        return {
+          name: this.normalizeCompanyName(record.brand),
+          instagramHandle: record.instagramHandle,
+          snippets: [record.proposition, record.domain],
+          titles: [`${record.domain} ${record.brand}`],
+          score: 15, 
+          preferredCategory: record.domain,
+          preferredPositioning: record.proposition,
+          source: 'csv' as const,
+        };
+      });
+
+    return matches;
+  }
+
+  private scoreCsvPropositionFit(targetProposition: string, candidateProposition: string) {
+    const targetTokens = new Set(this.extractKeywords(targetProposition));
+    const candidateTokens = this.extractKeywords(candidateProposition);
+    let overlap = 0;
+    for (const token of candidateTokens) {
+      if (targetTokens.has(token)) overlap += 1;
+    }
+    return overlap;
   }
 
   private getDocumentCompetitors(
@@ -783,6 +1278,110 @@ export class DiscoveryAgentService {
     if (ratio >= 0.6) return 4;
     if (ratio >= 0.4) return 2;
     return 0;
+  }
+
+  private loadBrandsFromExcel() {
+    if (this.brandsCache) return this.brandsCache;
+
+    const records: CsvBrandRecord[] = [];
+
+    // Try to load from brands_with_unique_propositions.csv using Python
+    const pythonScript = `
+import pandas as pd
+import json
+import sys
+
+try:
+    df = pd.read_csv('${this.brandsExcelPath.replace(/\\/g, '\\\\')}', encoding='latin1')
+    records = []
+    for _, row in df.iterrows():
+        records.append({
+            'brand': str(row.get('Company', '')).strip(),
+            'instagramHandle': str(row.get('ID', '')).strip().replace('@', '') if pd.notna(row.get('ID')) else None,
+            'domain': str(row.get('Domain', '')).strip() if pd.notna(row.get('Domain')) else '',
+            'proposition': str(row.get('Proposition', '')).strip() if pd.notna(row.get('Proposition')) else '',
+        })
+    print(json.dumps(records))
+except Exception as e:
+    print(json.dumps([]), file=sys.stderr)
+`;
+
+    const { writeFileSync, unlinkSync } = require('fs');
+    const { execSync } = require('child_process');
+    const tempPy = join(process.cwd(), 'load_brands.py');
+    writeFileSync(tempPy, pythonScript);
+
+    try {
+      const output = execSync(`python "${tempPy}"`, { 
+        encoding: 'utf8', 
+        stdio: ['pipe', 'pipe', 'ignore'],
+        maxBuffer: 10 * 1024 * 1024 // 10MB buffer for large JSON
+      });
+      unlinkSync(tempPy);
+      const parsed = JSON.parse(output) as Array<{ brand: string; instagramHandle: string | null; domain: string; proposition: string }>;
+
+      for (const item of parsed) {
+        if (!item.brand || !item.domain) continue;
+        records.push({
+          brand: item.brand,
+          canonicalBrand: this.normalizeCompanyName(item.brand).toLowerCase(),
+          instagramHandle: item.instagramHandle,
+          domain: item.domain,
+          proposition: item.proposition,
+        });
+      }
+    } catch (err) {
+      // Python/Excel load failed, return empty cache
+      console.error('Failed to load brands_with_unique_propositions.csv:', err);
+    }
+
+    this.brandsCache = this.dedupeBrands(records);
+    return records;
+  }
+
+  private parseCsvRow(row: string) {
+    const cells: string[] = [];
+    let current = '';
+    let insideQuotes = false;
+    for (let index = 0; index < row.length; index += 1) {
+      const character = row[index];
+      if (character === '"') {
+        if (insideQuotes && row[index + 1] === '"') {
+          current += '"';
+          index += 1;
+        } else {
+          insideQuotes = !insideQuotes;
+        }
+        continue;
+      }
+      if (character === ',' && !insideQuotes) {
+        cells.push(current.trim());
+        current = '';
+        continue;
+      }
+      current += character;
+    }
+    cells.push(current.trim());
+    return cells;
+  }
+
+  private dedupeBrands(records: CsvBrandRecord[]) {
+    const merged = new Map<string, CsvBrandRecord>();
+    for (const record of records) {
+      const key = record.canonicalBrand;
+      const existing = merged.get(key);
+      if (!existing) {
+        merged.set(key, record);
+        continue;
+      }
+      merged.set(key, {
+        ...existing,
+        instagramHandle: existing.instagramHandle ?? record.instagramHandle,
+        domain: existing.domain || record.domain,
+        proposition: existing.proposition.length >= record.proposition.length ? existing.proposition : record.proposition,
+      });
+    }
+    return Array.from(merged.values());
   }
 
   private loadBrandDocuments() {
@@ -881,13 +1480,34 @@ export class DiscoveryAgentService {
   private async resolveCompanyWebsite(company: CompanyCandidate) {
     if (company.website) return company.website;
     const results = await this.searchWeb(`"${company.name}" official website india`).catch(() => [] as SearchResult[]);
-    const best = results.find((result) => !/instagram\.com|facebook\.com|linkedin\.com|youtube\.com/i.test(result.url));
+    const ranked = results
+      .filter((result) => !/instagram\.com|facebook\.com|linkedin\.com|youtube\.com|amazon\.|flipkart\.|blinkit\.|zepto\.|swiggy\.|zomato\./i.test(result.url))
+      .map((result) => ({
+        result,
+        score: this.scoreWebsiteCandidate(result.url, company.name),
+      }))
+      .sort((a, b) => b.score - a.score);
+    const best = ranked[0]?.result;
     return best ? `https://${this.extractDomain(best.url)}` : undefined;
   }
 
   private extractCompanyPhrases(input: string) {
     const matches = input.match(/([A-Z][A-Za-z0-9&.+-]*(?:\s+[A-Z][A-Za-z0-9&.+-]*){0,3})/g) ?? [];
     return Array.from(new Set(matches.map((item) => item.trim()).filter((item) => item.length > 2)));
+  }
+
+  private scoreWebsiteCandidate(url: string, companyName: string) {
+    const domain = this.extractDomain(url);
+    const handleName = this.brandHandleName(companyName);
+    let score = 0;
+    if (!domain) return score;
+    const root = this.domainRoot(domain);
+    if (root === handleName) score += 12;
+    if (root.includes(handleName) || handleName.includes(root)) score += 8;
+    const tokens = this.normalizeCompanyName(companyName).toLowerCase().split(' ').filter(Boolean);
+    score += tokens.filter((token) => root.includes(token)).length * 2;
+    if (/www\./i.test(url)) score += 1;
+    return score;
   }
 
   private normalizeCompanyName(input: string) {
@@ -924,6 +1544,15 @@ export class DiscoveryAgentService {
     return false;
   }
 
+  private profileWebsiteMatchesCompanyWebsite(profileWebsite: string | null, companyWebsite?: string) {
+    if (!profileWebsite || !companyWebsite) return false;
+    return this.domainRoot(profileWebsite) === this.domainRoot(companyWebsite);
+  }
+
+  private async delay(ms: number) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
   private getCategoryProfiles(): CategoryProfile[] {
     return [
       {
@@ -945,6 +1574,24 @@ export class DiscoveryAgentService {
           { name: 'CoverSure', website: 'https://www.coversure.in', score: 11, reason: 'employee insurance administration India' },
           { name: 'Policybazaar for Business', website: 'https://www.policybazaar.com', score: 10, reason: 'business insurance India' },
           { name: 'Care Health Insurance', website: 'https://www.careinsurance.com', score: 9, reason: 'health insurance India' },
+        ],
+      },
+      {
+        id: 'fresh-meat-seafood',
+        label: 'fresh meat / seafood / D2C food',
+        keywords: ['meat', 'seafood', 'chicken', 'fish', 'mutton', 'fresh', 'delivery', 'raw', 'cuts', 'marinated', 'cold chain'],
+        productKeywords: ['meat', 'seafood', 'chicken', 'fish', 'mutton', 'fresh', 'raw', 'cuts', 'marinated', 'cold chain'],
+        targetMarketKeywords: ['consumer', 'household', 'kitchen', 'cooking', 'freshness'],
+        aspKeywords: ['premium', 'price', 'affordable', 'pack'],
+        placeKeywords: ['india', 'online', 'bangalore', 'mumbai', 'delhi', 'delivery'],
+        promotionKeywords: ['shop', 'order', 'buy', 'freshly cut', 'delivery'],
+        seeds: [
+          { name: 'FreshToHome', website: 'https://www.freshtohome.com', score: 16, reason: 'fresh meat and seafood India' },
+          { name: 'Tendercut', website: 'https://www.tendercut.in', score: 15, reason: 'meat delivery India' },
+          { name: 'Meatigo', website: 'https://www.meatigo.com', score: 14, reason: 'premium meat delivery India' },
+          { name: 'Zappfresh', website: 'https://www.zappfresh.com', score: 14, reason: 'fresh meat online India' },
+          { name: 'Meatwale', website: 'https://www.meatwale.com', score: 12, reason: 'meat shop chain India' },
+          { name: 'Goodness Me', website: 'https://goodnessme.in', score: 11, reason: 'D2C food India' },
         ],
       },
       {
@@ -1075,14 +1722,31 @@ export class DiscoveryAgentService {
         ],
       },
       {
+        id: 'airlines-aviation',
+        label: 'airlines / aviation',
+        keywords: ['airline', 'airlines', 'flight', 'flights', 'aviation', 'airport', 'boarding', 'jet', 'airways'],
+        productKeywords: ['airline', 'flight', 'aviation', 'airways', 'air travel'],
+        targetMarketKeywords: ['travellers', 'passengers', 'business', 'leisure', 'domestic', 'international'],
+        aspKeywords: ['fare', 'ticket', 'price', 'premium', 'budget', 'booking'],
+        placeKeywords: ['india', 'airport', 'domestic', 'international', 'routes'],
+        promotionKeywords: ['book now', 'fly', 'travel', 'routes', 'offers'],
+        seeds: [
+          { name: 'IndiGo', website: 'https://www.goindigo.in', score: 18, reason: 'largest airline India' },
+          { name: 'Air India', website: 'https://www.airindia.com', score: 17, reason: 'full-service airline India' },
+          { name: 'Akasa Air', website: 'https://www.akasaair.com', score: 16, reason: 'new airline India' },
+          { name: 'Air India Express', website: 'https://www.airindiaexpress.com', score: 15, reason: 'low-cost airline India' },
+          { name: 'Alliance Air', website: 'https://www.allianceair.in', score: 11, reason: 'regional airline India' },
+        ],
+      },
+      {
         id: 'travel-hospitality',
         label: 'travel / hospitality',
-        keywords: ['travel', 'hotel', 'stay', 'trip', 'vacation', 'booking', 'holiday', 'resort'],
-        productKeywords: ['travel', 'hotel', 'stay', 'trip', 'vacation', 'booking'],
+        keywords: ['travel', 'hotel', 'stay', 'trip', 'vacation', 'booking', 'holiday', 'resort', 'airline', 'flight', 'airlines', 'aviation'],
+        productKeywords: ['travel', 'hotel', 'stay', 'trip', 'vacation', 'booking', 'flight', 'airline'],
         targetMarketKeywords: ['travellers', 'families', 'tourists', 'business'],
-        aspKeywords: ['price', 'premium', 'budget', 'booking'],
-        placeKeywords: ['india', 'destinations', 'cities', 'resort'],
-        promotionKeywords: ['book now', 'plan', 'travel', 'stay'],
+        aspKeywords: ['price', 'premium', 'budget', 'booking', 'fare', 'ticket'],
+        placeKeywords: ['india', 'destinations', 'cities', 'resort', 'airport'],
+        promotionKeywords: ['book now', 'plan', 'travel', 'stay', 'fly'],
         seeds: [
           { name: 'MakeMyTrip', website: 'https://www.makemytrip.com', score: 16, reason: 'travel booking India' },
           { name: 'Goibibo', website: 'https://www.goibibo.com', score: 14, reason: 'travel booking India' },

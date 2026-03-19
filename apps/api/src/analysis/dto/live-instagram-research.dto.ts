@@ -1,4 +1,5 @@
-import { IsInt, IsOptional, IsString, Matches, Max, Min } from 'class-validator';
+import { IsArray, IsInt, IsOptional, IsString, Matches, Max, Min, ValidateNested } from 'class-validator';
+import { Type } from 'class-transformer';
 
 export class LiveInstagramResearchDto {
   @IsString()
@@ -33,4 +34,18 @@ export class LiveInstagramResearchDto {
   @Min(0)
   @Max(1)
   forceRefresh?: number;
+
+  @IsOptional()
+  @IsArray()
+  @ValidateNested({ each: true })
+  @Type(() => ConfirmedCompetitorDto)
+  confirmedCompetitors?: ConfirmedCompetitorDto[];
+}
+
+export class ConfirmedCompetitorDto {
+  @IsString()
+  companyName!: string;
+
+  @IsString()
+  handle!: string;
 }

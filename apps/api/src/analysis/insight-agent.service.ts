@@ -14,6 +14,36 @@ export class InsightAgentService {
 
   async run(input: LiveInstagramResearchDto) {
     const collection = await this.collectionAgentService.run(input);
+
+    if (collection.discovery?.needsConfirmation) {
+      return {
+        generatedAt: new Date().toISOString(),
+        sourceMode: 'agent-3-insights-pending',
+        collectionSummary: collection.summary,
+        targetDetail: this.analyzeAccount(collection.target),
+        competitors: collection.competitors.map((account) => ({
+          ...this.analyzeAccount(account),
+          candidates: account.candidates,
+        })),
+        marketSummary: {
+          competitorCount: collection.competitors.length,
+          averageFollowers: 0,
+          averageViewsAcrossCompetitors: null,
+          averageReelViewsAcrossCompetitors: null,
+          topHookThemes: [],
+          topCaptionStyles: [],
+          bestPostingWindows: [],
+          bestPerformingPostSamples: [],
+        },
+        recommendations: {
+          targetObservation: 'Discovery Agent found multiple Instagram handles that look correct. Please confirm the right IDs below to proceed with deep data collection.',
+          priorities: ['Confirm official Instagram handles for competitors labeled "Unsure".'],
+          buildNext: [],
+        },
+        discovery: collection.discovery,
+      };
+    }
+
     const targetDetail = this.analyzeAccount(collection.target);
     const competitors = collection.competitors.map((account) => this.analyzeAccount(account));
     const rankedCompetitors = [...competitors].sort(
@@ -53,6 +83,7 @@ export class InsightAgentService {
           'Wire Instagram login fallback only for accounts where provider collection is incomplete.',
         ],
       },
+      discovery: collection.discovery,
     };
   }
 
@@ -195,15 +226,11 @@ export class InsightAgentService {
 
   private classifyContentType(caption: string, category: string, bio: string) {
     const combined = `${caption} ${category} ${bio}`;
-    if (/kurta|saree|ethnic|apparel|fashion|style|collection|size inclusive|xs|xl|6xl|wear/i.test(combined)) return 'Fashion / Apparel';
-    if (/launching|drop|new collection|shop now|edit|festive|summer|winter/i.test(combined)) return 'Collection Launch';
-    if (/claim|coverage|policy|insurance|broker/i.test(combined)) return 'Insurance Explainer';
-    if (/employee|benefit|workplace|hr|team/i.test(combined)) return 'Employee Benefits';
-    if (/health|wellness|care|medical/i.test(combined)) return 'Health Education';
-    if (/event|campaign|launch|partnership/i.test(combined)) return 'Campaign / Event';
-    if (/offer|pricing|plan|discount|book/i.test(combined)) return 'Product Promotion';
-    if (/culture|team|office|hiring/i.test(combined)) return 'Employer Brand';
-    return 'General Brand Education';
+    if (/launching|drop|new collection|shop now|edit|festive|summer|winter/i.test(combined)) return 'Launch / Promotion';
+    if (/tutorial|how to|tips|guide|routine|step|hack/i.test(combined)) return 'Education / Tutorial';
+    if (/story|journey|behind the scenes|bts|founder|team|culture/i.test(combined)) return 'Brand Story';
+    if (/offer|pricing|plan|discount|book|buy now|shop now/i.test(combined)) return 'Offer / Conversion';
+    return 'General Content';
   }
 
   private buildThumbnailLabel(caption: string, alt?: string) {

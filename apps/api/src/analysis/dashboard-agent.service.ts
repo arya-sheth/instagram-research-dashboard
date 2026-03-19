@@ -74,9 +74,11 @@ export class DashboardAgentService {
         mix: competitor.mix,
         topPosts: competitor.topPosts,
         signals: competitor.signals,
+        candidates: competitor.candidates,
       })),
       marketSummary: insights.marketSummary,
       recommendations: insights.recommendations,
+      discovery: (insights as any).discovery,
     };
 
     const cache = this.readCache().filter((entry) => entry.key !== cacheKey);
@@ -92,6 +94,7 @@ export class DashboardAgentService {
       industry: input.industry?.toLowerCase() ?? '',
       competitorLimit: input.competitorLimit ?? 10,
       recentPostLimit: input.recentPostLimit ?? 500,
+      confirmed: input.confirmedCompetitors?.map(c => `${c.companyName}:${c.handle}`).sort() ?? [],
     });
   }
 

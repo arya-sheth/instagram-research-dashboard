@@ -1,4 +1,4 @@
-﻿import { Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 import { DiscoveryAgentService } from './discovery-agent.service';
 import { LiveInstagramResearchDto } from './dto/live-instagram-research.dto';
 import { InstagramPlaywrightService } from './instagram-playwright.service';
@@ -37,6 +37,14 @@ type AccountCollection = {
   officialSignals: string[];
   whyItMatched: string[];
   mediaItems: CollectionMediaItem[];
+  candidates?: Array<{
+    handle: string;
+    fullName: string | null;
+    bio: string | null;
+    followers: number | null;
+    verified: boolean;
+    score: number;
+  }>;
 };
 
 type CollectionResponse = {
@@ -51,6 +59,10 @@ type CollectionResponse = {
     collectionCapPerAccount: number;
     warnings: string[];
   };
+  discovery?: {
+    needsConfirmation: boolean;
+    competitors: any[];
+  };
 };
 
 @Injectable()
@@ -62,11 +74,68 @@ export class CollectionAgentService {
 
   async run(input: LiveInstagramResearchDto): Promise<CollectionResponse> {
     const discovery = await this.discoveryAgentService.run(input);
-    const cap = Math.min(500, Math.max(10, input.recentPostLimit ?? 500));
+    const requestedCompetitorLimit = Math.min(4, Math.max(2, input.competitorLimit ?? 4));
+    const requestedCap = Math.min(20, Math.max(5, input.recentPostLimit ?? 8));
+    const effectiveCompetitorCount = Math.max(1, discovery.competitors.length || requestedCompetitorLimit);
+    const safePerAccountCap = Math.max(6, Math.floor(40 / (effectiveCompetitorCount + 1)));
+    const cap = Math.min(requestedCap, 8, safePerAccountCap);
+
+    if (discovery.discovery.needsConfirmation) {
+      return {
+        generatedAt: new Date().toISOString(),
+        sourceMode: 'agent-2-collection-pending',
+        target: {
+          handle: discovery.target.resolvedInstagramHandle,
+          profileUrl: discovery.target.profileUrl,
+          brandName: discovery.target.inputCompanyName,
+          bio: discovery.target.bio,
+          businessCategory: discovery.target.category,
+          followerCount: discovery.target.followers,
+          followingCount: null,
+          postCount: null,
+          verified: discovery.target.verified,
+          profileImage: null,
+          collectionSource: 'discovery-pending',
+          collectionWarnings: [],
+          officialSignals: [],
+          whyItMatched: [],
+          mediaItems: [],
+        },
+        competitors: discovery.competitors.map(c => ({
+          handle: c.officialInstagramHandle ?? '',
+          profileUrl: c.instagramProfileUrl ?? '',
+          brandName: c.companyName,
+          bio: c.instagramProfile?.bio ?? null,
+          businessCategory: c.instagramProfile?.category ?? null,
+          followerCount: c.instagramProfile?.followers ?? null,
+          followingCount: null,
+          postCount: c.instagramProfile?.posts ?? null,
+          verified: c.instagramProfile?.verified ?? false,
+          profileImage: null,
+          collectionSource: 'discovery-pending',
+          collectionWarnings: [],
+          officialSignals: c.officialSignals,
+          whyItMatched: c.whyItMatched,
+          mediaItems: [],
+          candidates: c.candidates,
+        })),
+        summary: {
+          competitorCount: discovery.competitors.length,
+          totalAccountsCollected: 0,
+          totalMediaItems: 0,
+          collectionCapPerAccount: cap,
+          warnings: ['Discovery Agent found ambiguous Instagram handles that require user confirmation before collection.'],
+        },
+        discovery: {
+          needsConfirmation: true,
+          competitors: discovery.competitors,
+        },
+      };
+    }
 
     const target = await this.collectAccount(discovery.target.resolvedInstagramHandle, cap);
     const competitorHandles = discovery.competitors
-      .slice(0, input.competitorLimit ?? 10)
+      .slice(0, requestedCompetitorLimit)
       .map((competitor) => competitor.officialInstagramHandle)
       .filter((handle): handle is string => Boolean(handle));
     const competitorMap = new Map(
@@ -93,7 +162,9 @@ export class CollectionAgentService {
           this.instagramPlaywrightService.hasSavedSession()
             ? 'Saved Instagram session detected. Deep post and reel collection is enabled.'
             : 'No saved Instagram session detected. Profile metadata works, but deep post and reel collection will stay limited until you run npm.cmd run instagram:login once.',
-          'Large runs are slower now because each post or reel is collected directly from Instagram pages on your machine.',
+          requestedCap > cap || requestedCompetitorLimit >= 6
+            ? `Requested workload was auto-clamped for stability. Using ${cap} items per account across up to ${requestedCompetitorLimit} competitors in this run.`
+            : 'Large runs are slower now because each post or reel is collected directly from Instagram pages on your machine.',
         ],
       },
     };

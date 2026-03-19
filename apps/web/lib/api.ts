@@ -1,4 +1,4 @@
-﻿export type MediaType = 'reel' | 'post';
+export type MediaType = 'reel' | 'post';
 
 export type BreakdownItem = {
   label: string;
@@ -67,6 +67,14 @@ export type LiveCompetitorResearch = {
   };
   topPosts: LivePostSample[];
   signals: string[];
+  candidates?: Array<{
+    handle: string;
+    fullName: string | null;
+    bio: string | null;
+    followers: number | null;
+    verified: boolean;
+    score: number;
+  }>;
 };
 
 export type LiveResearchResponse = {
@@ -102,6 +110,10 @@ export type LiveResearchResponse = {
     targetObservation: string;
     priorities: string[];
     buildNext: string[];
+  };
+  discovery?: {
+    needsConfirmation: boolean;
+    competitors: any[];
   };
 };
 
@@ -140,6 +152,7 @@ export const api = {
     competitorLimit?: number;
     recentPostLimit?: number;
     forceRefresh?: number;
+    confirmedCompetitors?: Array<{ companyName: string; handle: string }>;
   }) =>
     fetchJson<LiveResearchResponse>('/analysis/instagram-research/live', {
       method: 'POST',
